@@ -54,10 +54,12 @@
     }
 
     h1 {
-      font-size: clamp(2.1rem, 5vw, 4rem);
-      line-height: 1.05;
-      margin: 0 0 16px;
-      letter-spacing: -0.04em;
+      font-size: clamp(2.8rem, 8vw, 6.4rem);
+      line-height: 0.98;
+      margin: 0 0 18px;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      text-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     }
 
     .subtitle {
@@ -441,6 +443,10 @@
   <script>
     const YEAR = new Date().getFullYear();
 
+    // https://script.google.com/macros/s/AKfycbzFxfMYQCfzcKc2Zo-pSOahdUwEGUks5WOPYwhNWdPmL1-2uefP6Cy3tUb9vePj3gOvuA/exec
+    // Debe ser una URL parecida a: https://script.google.com/macros/s/AKfycb.../exec
+    const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzFxfMYQCfzcKc2Zo-pSOahdUwEGUks5WOPYwhNWdPmL1-2uefP6Cy3tUb9vePj3gOvuA/exec";
+
     const months = [
       { index: 5, name: "Junio" },
       { index: 6, name: "Julio" },
@@ -598,7 +604,7 @@
       userDialog.showModal();
     }
 
-    function finishReservation() {
+    async function finishReservation() {
       const orderedDates = Array.from(selected).sort();
       const finishError = document.getElementById("finishError");
 
@@ -612,13 +618,47 @@
         internet: currentUser.internet,
         start: orderedDates[0],
         end: orderedDates[orderedDates.length - 1],
-        days: orderedDates.length
+        days: orderedDates.length,
+        selectedDays: orderedDates
       };
 
       reservations.push(reservation);
       renderReservations();
       document.getElementById("reservasPanel").classList.remove("hidden");
       document.getElementById("reservasPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+
+      await saveReservationToGoogleSheets(reservation);
+    }
+
+    async function saveReservationToGoogleSheets(reservation) {
+      if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes("https://script.google.com/macros/s/AKfycbzFxfMYQCfzcKc2Zo-pSOahdUwEGUks5WOPYwhNWdPmL1-2uefP6Cy3tUb9vePj3gOvuA/exec")) {
+        alert("La reserva se ha mostrado en pantalla, pero todavía falta pegar la URL de Google Apps Script en el código.");
+        return;
+      }
+
+      const payload = {
+        nombre: reservation.name,
+        internet: reservation.internet,
+        fechaInicio: formatDate(reservation.start),
+        fechaFin: formatDate(reservation.end),
+        numeroDias: reservation.days,
+        diasSeleccionados: reservation.selectedDays.map(formatDate).join(", ")
+      };
+
+      try {
+        await fetch(GOOGLE_SCRIPT_URL, {
+          method: "POST",
+          mode: "no-cors",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        alert("Reserva enviada correctamente. Comprueba la hoja de Google Sheets.");
+      } catch (error) {
+        alert("No se ha podido enviar la reserva a Google Sheets. Revisa la URL de Apps Script.");
+      }
     }
 
     function renderReservations() {
