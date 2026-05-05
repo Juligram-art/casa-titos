@@ -148,6 +148,59 @@
       color: white;
     }
 
+    .day.booked {
+      background: #fee2e2;
+      border-color: #fecaca;
+      color: #991b1b;
+      cursor: not-allowed;
+      position: relative;
+    }
+
+    .day.booked::after {
+      content: "×";
+      position: absolute;
+      top: 1px;
+      right: 5px;
+      font-size: 0.8rem;
+      font-weight: 900;
+    }
+
+    .legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .legend-dot {
+      width: 18px;
+      height: 18px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      display: inline-block;
+      background: white;
+    }
+
+    .legend-dot.selected-dot {
+      background: var(--selected);
+      border-color: var(--selected);
+    }
+
+    .legend-dot.booked-dot {
+      background: #fee2e2;
+      border-color: #fecaca;
+    }
+
     .blank { min-height: 38px; }
 
     .summary {
@@ -404,6 +457,12 @@
 
   <main>
     <section id="calendarPanel" class="panel hidden">
+      <div class="legend" aria-label="Leyenda del calendario">
+        <span class="legend-item"><span class="legend-dot"></span> Libre</span>
+        <span class="legend-item"><span class="legend-dot selected-dot"></span> Seleccionado</span>
+        <span class="legend-item"><span class="legend-dot booked-dot"></span> Ocupado</span>
+      </div>
+
       <div id="calendar" class="calendar-grid" aria-label="Calendario de reservas"></div>
 
       <div class="summary">
@@ -456,6 +515,7 @@
 
     const weekdays = ["L", "M", "X", "J", "V", "S", "D"];
     const selected = new Set();
+    const booked = new Set();
     const reservations = [];
 
     let currentUser = {
@@ -471,6 +531,7 @@
     window.addEventListener("DOMContentLoaded", () => {
       renderCalendar();
       updateSummary();
+      loadBookedDatesFromGoogleSheets();
       userDialog.showModal();
     });
 
@@ -553,7 +614,15 @@
 
           if (selected.has(dateIso)) button.classList.add("selected");
 
+          if (booked.has(dateIso)) {
+            button.disabled = true;
+            button.classList.add("booked");
+            button.title = "Día ya reservado";
+          }
+
           button.addEventListener("click", () => {
+            if (booked.has(dateIso)) return;
+
             if (selected.has(dateIso)) {
               selected.delete(dateIso);
             } else {
@@ -628,6 +697,35 @@
       document.getElementById("reservasPanel").scrollIntoView({ behavior: "smooth", block: "start" });
 
       await saveReservationToGoogleSheets(reservation);
+
+      reservation.selectedDays.forEach(date => booked.add(date));
+      selected.clear();
+      renderCalendar();
+      updateSummary();
+    }
+
+    function loadBookedDatesFromGoogleSheets() {
+      if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes("PEGA_AQUI")) return;
+
+      window.recibirReservas = function(data) {
+        if (!data || !Array.isArray(data.reservas)) return;
+
+        booked.clear();
+        data.reservas.forEach(reserva => {
+          if (Array.isArray(reserva.dias)) {
+            reserva.dias.forEach(dateIso => booked.add(dateIso));
+          }
+        });
+
+        renderCalendar();
+      };
+
+      const script = document.createElement("script");
+      script.src = `${GOOGLE_SCRIPT_URL}?callback=recibirReservas&nocache=${Date.now()}`;
+      script.onerror = function() {
+        console.warn("No se pudieron cargar las reservas desde Google Sheets.");
+      };
+      document.body.appendChild(script);
     }
 
     async function saveReservationToGoogleSheets(reservation) {
