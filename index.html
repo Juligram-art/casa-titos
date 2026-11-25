@@ -86,6 +86,11 @@
       box-shadow: 0 18px 45px rgba(15, 23, 42, 0.06);
     }
 
+    .year-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:18px; }
+    .year-toolbar label { margin:0; }
+    .year-toolbar select { font:inherit; font-weight:800; color:var(--primary-dark); padding:10px 16px; border:1px solid var(--border); border-radius:12px; background:white; }
+    button:disabled { cursor:not-allowed; opacity:.65; }
+    .day.booked:disabled { opacity:1; }
     .hidden { display: none !important; }
 
     .calendar-grid {
@@ -457,6 +462,12 @@
 
   <main>
     <section id="calendarPanel" class="panel hidden">
+      <div class="year-toolbar">
+        <label for="bookingYear">Año de la reserva</label>
+        <select id="bookingYear"></select>
+        <button id="refreshButton" class="action secondary" type="button">Actualizar disponibilidad</button>
+      </div>
+      <p id="availabilityStatus" class="note" role="status" aria-live="polite"></p>
       <div class="legend" aria-label="Leyenda del calendario">
         <span class="legend-item"><span class="legend-dot"></span> Libre</span>
         <span class="legend-item"><span class="legend-dot selected-dot"></span> Seleccionado</span>
@@ -471,7 +482,7 @@
           <div id="selectedDates">Todavía no has seleccionado ningún día.</div>
           <div class="button-row">
             <button class="action secondary" type="button" onclick="clearSelection()">Borrar selección</button>
-            <button class="action primary" type="button" onclick="finishReservation()">Finalizar</button>
+            <button class="action primary" type="button" id="finishButton" onclick="finishReservation()">Finalizar</button>
           </div>
           <div id="finishError" class="error hidden">Selecciona al menos un día antes de finalizar.</div>
         </div>
@@ -486,11 +497,11 @@
 
     <section id="reservasPanel" class="reservas-panel hidden">
       <div class="reservas-title">
-        <h2>RESERVAS</h2>
+        <h2>RESERVAS <span id="listYear"></span></h2>
       </div>
       <div id="reservasList"></div>
       <p class="note">
-        En esta versión estática, la reserva se muestra en pantalla, pero no se guarda en una base de datos.
+        Reservas registradas en Google Sheets para el año seleccionado.
       </p>
     </section>
   </main>
@@ -500,7 +511,10 @@
   </footer>
 
   <script>
-    const YEAR = new Date().getFullYear();
+    const today = new Date();
+    let YEAR = Math.max(2027, today.getFullYear() + (today.getMonth() >= 9 ? 1 : 0));
+    let ready = false, busy = false;
+    let allReservations = [];
 
     // PEGA AQUÍ TU URL DE GOOGLE APPS SCRIPT.
     // Debe ser una URL parecida a: https://script.google.com/macros/s/AKfycb.../exec
@@ -523,13 +537,27 @@
       internet: ""
     };
 
-    document.getElementById("year").textContent = YEAR;
+    document.getElementById("year").textContent = today.getFullYear();
 
     const userDialog = document.getElementById("userDialog");
     const userForm = document.getElementById("userForm");
 
     window.addEventListener("DOMContentLoaded", () => {
-      renderCalendar();
+      const picker = document.getElementById("bookingYear");
+      for (let y = 2027; y <= Math.max(2037, YEAR + 10); y++) picker.add(new Option(String(y), String(y)));
+      picker.value = String(YEAR);
+      picker.addEventListener("change", () => {
+        YEAR = Number(picker.value);
+        if (YEAR >= Number(picker.lastElementChild.value) - 1) {
+          for (let y = YEAR + 2; y <= YEAR + 11; y++) if (!Array.from(picker.options).some(o => Number(o.value) === y)) picker.add(new Option(String(y), String(y)));
+        }
+        selected.clear();
+        applyYear();
+        updateSummary();
+        loadBookedDatesFromGoogleSheets();
+      });
+      document.getElementById("refreshButton").addEventListener("click", () => loadBookedDatesFromGoogleSheets());
+      applyYear();
       updateSummary();
       loadBookedDatesFromGoogleSheets();
       userDialog.showModal();
@@ -580,7 +608,7 @@
         monthDiv.className = "month";
 
         const title = document.createElement("h2");
-        title.textContent = month.name;
+        title.textContent = `${month.name} ${YEAR}`;
         monthDiv.appendChild(title);
 
         const weekdayRow = document.createElement("div");
@@ -610,6 +638,7 @@
           button.type = "button";
           button.className = "day";
           button.textContent = day;
+          button.disabled = !ready || busy;
           button.setAttribute("aria-label", `${day} de ${month.name}`);
 
           if (selected.has(dateIso)) button.classList.add("selected");
@@ -621,7 +650,7 @@
           }
 
           button.addEventListener("click", () => {
-            if (booked.has(dateIso)) return;
+            if (!ready || busy || booked.has(dateIso)) return;
 
             if (selected.has(dateIso)) {
               selected.delete(dateIso);
@@ -642,6 +671,7 @@
     }
 
     function updateSummary() {
+      document.getElementById("finishButton").disabled = !ready || busy || selected.size === 0;
       const selectedDates = document.getElementById("selectedDates");
       const orderedDates = Array.from(selected).sort();
 
@@ -673,85 +703,104 @@
       userDialog.showModal();
     }
 
-    async function finishReservation() {
-      const orderedDates = Array.from(selected).sort();
-      const finishError = document.getElementById("finishError");
-
-      if (orderedDates.length === 0) {
-        finishError.classList.remove("hidden");
-        return;
+    function applyYear() {
+      booked.clear();
+      reservations.length = 0;
+      for (const item of allReservations) {
+        const days = [...new Set(item.dias.filter(d => typeof d === "string" && d.startsWith(`${YEAR}-`)))].sort();
+        if (!days.length) continue;
+        days.forEach(d => booked.add(d));
+        reservations.push({name:String(item.nombre || ""), internet:String(item.internet || ""), start:days[0], end:days[days.length-1], days:days.length, selectedDays:days});
       }
-
-      const reservation = {
-        name: currentUser.name,
-        internet: currentUser.internet,
-        start: orderedDates[0],
-        end: orderedDates[orderedDates.length - 1],
-        days: orderedDates.length,
-        selectedDays: orderedDates
-      };
-
-      reservations.push(reservation);
-      renderReservations();
-      document.getElementById("reservasPanel").classList.remove("hidden");
-      document.getElementById("reservasPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-
-      await saveReservationToGoogleSheets(reservation);
-
-      reservation.selectedDays.forEach(date => booked.add(date));
-      selected.clear();
-      renderCalendar();
-      updateSummary();
+      for (const d of selected) if (booked.has(d)) selected.delete(d);
+      document.getElementById("listYear").textContent = YEAR;
+      document.getElementById("reservasPanel").classList.toggle("hidden", !ready && !busy);
+      renderCalendar(); renderReservations(); updateSummary();
     }
 
-    function loadBookedDatesFromGoogleSheets() {
-      if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes("PEGA_AQUI")) return;
-
-      window.recibirReservas = function(data) {
-        if (!data || !Array.isArray(data.reservas)) return;
-
-        booked.clear();
-        data.reservas.forEach(reserva => {
-          if (Array.isArray(reserva.dias)) {
-            reserva.dias.forEach(dateIso => booked.add(dateIso));
-          }
-        });
-
-        renderCalendar();
-      };
-
-      const script = document.createElement("script");
-      script.src = `${GOOGLE_SCRIPT_URL}?callback=recibirReservas&nocache=${Date.now()}`;
-      script.onerror = function() {
-        console.warn("No se pudieron cargar las reservas desde Google Sheets.");
-      };
-      document.body.appendChild(script);
+    function readReservations() {
+      return new Promise((resolve, reject) => {
+        const callback = "recibirReservas";
+        const script = document.createElement("script");
+        let timer;
+        const cleanup = () => { clearTimeout(timer); script.remove(); delete window[callback]; };
+        window[callback] = data => {
+          cleanup();
+          if (!data || !Array.isArray(data.reservas)) return reject(new Error("Respuesta inválida"));
+          resolve(data.reservas.filter(r => r && Array.isArray(r.dias)));
+        };
+        script.onerror = () => { cleanup(); reject(new Error("Error de conexión")); };
+        timer = setTimeout(() => { cleanup(); reject(new Error("Tiempo agotado")); }, 15000);
+        script.src = `${GOOGLE_SCRIPT_URL}?callback=${callback}&nocache=${Date.now()}`;
+        document.body.appendChild(script);
+      });
     }
 
-    async function saveReservationToGoogleSheets(reservation) {
-      if (!GOOGLE_SCRIPT_URL || GOOGLE_SCRIPT_URL.includes("PEGA_AQUI")) {
-        alert("La reserva se ha mostrado en pantalla, pero todavía falta pegar la URL de Google Apps Script en el código.");
-        return;
-      }
-
-      const payload = new URLSearchParams();
-      payload.append("nombre", reservation.name);
-      payload.append("internet", reservation.internet);
-      payload.append("fechaInicio", formatDate(reservation.start));
-      payload.append("fechaFin", formatDate(reservation.end));
-      payload.append("numeroDias", reservation.days);
-      payload.append("diasSeleccionados", reservation.selectedDays.map(formatDate).join(", "));
-
+    let reading = false;
+    async function loadBookedDatesFromGoogleSheets() {
+      if (reading || busy) return;
+      reading = true; ready = false;
+      const status = document.getElementById("availabilityStatus");
+      document.getElementById("bookingYear").disabled = true;
+      document.getElementById("refreshButton").disabled = true;
+      status.textContent = "Consultando disponibilidad…";
+      applyYear();
       try {
-        await fetch(GOOGLE_SCRIPT_URL, {
-          method: "POST",
-          mode: "no-cors",
-          body: payload
-        });
+        allReservations = await readReservations();
+        ready = true;
+        status.textContent = "Disponibilidad actualizada.";
+      } catch (e) {
+        status.textContent = "No se ha podido consultar Google Sheets. Pulsa Actualizar disponibilidad antes de reservar.";
+      } finally {
+        reading = false;
+        document.getElementById("bookingYear").disabled = false;
+        document.getElementById("refreshButton").disabled = false;
+        applyYear();
+      }
+    }
 
-        alert("Reserva enviada. Comprueba la hoja de Google Sheets.");
-      } catch (error) {
-        alert("No se ha podido enviar la reserva a Google Sheets. Revisa la URL de Apps Script y la implementación.");
+    async function finishReservation() {
+      if (!ready || busy || !selected.size) return;
+      const dates = [...selected].sort();
+      const name = currentUser.name, internet = currentUser.internet;
+      const status = document.getElementById("availabilityStatus");
+      busy = true;
+      document.getElementById("bookingYear").disabled = true;
+      document.getElementById("refreshButton").disabled = true;
+      renderCalendar(); updateSummary();
+      let sent = false;
+      try {
+        status.textContent = "Comprobando disponibilidad…";
+        allReservations = await readReservations();
+        applyYear();
+        if (dates.some(d => booked.has(d))) {
+          status.textContent = "Alguno de los días acaba de reservarse. Revisa tu selección.";
+          return;
+        }
+        const payload = new URLSearchParams({nombre:name, internet:internet, fechaInicio:formatDate(dates[0]), fechaFin:formatDate(dates[dates.length-1]), numeroDias:String(dates.length), diasSeleccionados:dates.map(formatDate).join(", ")});
+        status.textContent = "Enviando reserva…";
+        sent = true;
+        await fetch(GOOGLE_SCRIPT_URL, {method:"POST", mode:"no-cors", body:payload});
+        let confirmed = false;
+        for (let i=0;i<3;i++) {
+          allReservations = await readReservations();
+          confirmed = allReservations.some(r => String(r.nombre || "") === name && String(r.internet || "") === internet && [...new Set(r.dias)].sort().join() === dates.join());
+          if (confirmed) break;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (!confirmed) throw new Error("No se ha confirmado la escritura");
+        selected.clear();
+        status.textContent = "Reserva confirmada en Google Sheets.";
+        applyYear();
+        document.getElementById("reservasPanel").scrollIntoView({behavior:"smooth",block:"start"});
+      } catch(e) {
+        ready = false;
+        status.textContent = sent ? "No se ha podido confirmar la reserva. Actualiza la disponibilidad antes de volver a enviarla." : "No se ha podido consultar la disponibilidad. Actualízala antes de reservar.";
+      } finally {
+        busy = false;
+        document.getElementById("bookingYear").disabled = false;
+        document.getElementById("refreshButton").disabled = false;
+        applyYear();
       }
     }
 
@@ -759,6 +808,7 @@
       const reservasList = document.getElementById("reservasList");
       reservasList.innerHTML = "";
 
+      if (!reservations.length) reservasList.textContent = "No hay reservas registradas para este año.";
       reservations.forEach(reservation => {
         const row = document.createElement("div");
         row.className = "reserva-row";
@@ -771,7 +821,13 @@
 
         const right = document.createElement("div");
         right.className = "reserva-period";
-        right.textContent = `${formatDate(reservation.start)} - ${formatDate(reservation.end)} · ${reservation.days} día(s)`;
+        const ranges = [];
+        for (const date of reservation.selectedDays) {
+          const last = ranges[ranges.length-1];
+          if (last && Date.parse(date) - Date.parse(last[1]) === 86400000) last[1] = date;
+          else ranges.push([date,date]);
+        }
+        right.textContent = ranges.map(([a,b]) => a === b ? formatDate(a) : `${formatDate(a)} – ${formatDate(b)}`).join("; ") + ` · ${reservation.days} día(s)`;
 
         row.appendChild(left);
         row.appendChild(right);
